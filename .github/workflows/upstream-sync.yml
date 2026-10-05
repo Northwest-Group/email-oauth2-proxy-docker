@@ -1,0 +1,125 @@
+name: Upstream Sync
+
+# Keeps this fork downstream of blacktirion/email-oauth2-proxy-docker and pinned to the latest
+# simonrob/email-oauth2-proxy plugins branch. Clean updates are merged, tested and built automatically;
+# anything that conflicts or fails tests is opened as a pull request instead.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-sync-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    outputs:
+      changed: ${{ steps.result.outputs.changed }}
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SYNC_BRANCH: upstream-sync
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge blacktirion upstream
+        id: merge
+        run: |
+          source .github/upstream.env
+          git fetch --no-tags "$BLACKTIRION_REPO" "$BLACKTIRION_BRANCH:refs/remotes/upstream/main"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date with blacktirion"
+            echo "status=current" >> $GITHUB_OUTPUT
+          elif git merge --no-edit -m "Merge blacktirion upstream $(git rev-parse --short upstream/main)" upstream/main; then
+            echo "status=merged" >> $GITHUB_OUTPUT
+          else
+            git merge --abort
+            echo "status=conflict" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Bump upstream proxy version
+        id: bump
+        run: |
+          source .github/upstream.env
+          LATEST=$(git ls-remote "https://github.com/${EMAILPROXY_REPO}.git" "refs/heads/${EMAILPROXY_BRANCH}" | cut -f1)
+          if [ -z "$LATEST" ] || [ "$LATEST" = "$EMAILPROXY_REF" ]; then
+            echo "bumped=false" >> $GITHUB_OUTPUT
+          else
+            sed -i "s/^EMAILPROXY_REF=.*/EMAILPROXY_REF=${LATEST}/" .github/upstream.env
+            git commit -am "Bump emailproxy ${EMAILPROXY_BRANCH} to ${LATEST:0:7}"
+            echo "bumped=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run plugin tests
+        id: tests
+        if: steps.merge.outputs.status == 'merged' || steps.bump.outputs.bumped == 'true'
+        continue-on-error: true
+        run: |
+          source .github/upstream.env
+          BASE="https://raw.githubusercontent.com/${EMAILPROXY_REPO}/${EMAILPROXY_REF}"
+          curl -fsSL -o emailproxy.py "$BASE/emailproxy.py"
+          curl -fsSL -o plugins/BasePlugin.py "$BASE/plugins/BasePlugin.py"
+          python3 -m unittest discover -s tests -v
+
+      - name: Push to main or open pull request
+        id: result
+        run: |
+          STATUS="${{ steps.merge.outputs.status }}"
+          BUMPED="${{ steps.bump.outputs.bumped }}"
+          TESTS="${{ steps.tests.outcome }}"
+
+          open_pr() {  # $1 = branch head, $2 = title, $3 = body
+            git push --force origin "$1:refs/heads/${SYNC_BRANCH}"
+            if [ -z "$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[].number')" ]; then
+              gh pr create --base main --head "$SYNC_BRANCH" --title "$2" --body "$3"
+            else
+              echo "Pull request already open for ${SYNC_BRANCH}; branch updated"
+            fi
+          }
+
+          if [ "$STATUS" = "conflict" ]; then
+            open_pr upstream/main "Upstream sync: blacktirion changes conflict" \
+              "Merging \`blacktirion/main\` into \`main\` has conflicts. Resolve them in this PR; merging it builds a new image."
+            if [ "$BUMPED" = "true" ] && [ "$TESTS" = "success" ]; then
+              git push origin HEAD:main  # proxy bump is independent of the conflicting merge
+              echo "changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "changed=false" >> $GITHUB_OUTPUT
+            fi
+          elif [ "$STATUS" = "current" ] && [ "$BUMPED" != "true" ]; then
+            echo "Nothing to do"
+            echo "changed=false" >> $GITHUB_OUTPUT
+          elif [ "$TESTS" != "success" ]; then
+            open_pr HEAD "Upstream sync: tests failed" \
+              "Upstream changes merged cleanly but the plugin tests failed. See run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}."
+            echo "changed=false" >> $GITHUB_OUTPUT
+          else
+            git push origin HEAD:main
+            echo "changed=true" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/build-and-push-image.yml

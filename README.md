@@ -85,3 +85,26 @@ This will create a new container with the email OAuth2 proxy and start it. The p
 |Ports| `1993:1993` | Allows the docker daemon to forward all requests to the container on this port. This may change, depending on if you are using POP3 or other proxy methods. This particular method is for IMAP. |
 |Ports| `8080:80` | Allows the docker daemon to forward all requests to the container on port 8080 and map to the proxy on port 80. Useful for the `LOCAL_SERVER_AUTH` flag. |
 |Image| `ghcr.io/blacktirion/email-oauth2-proxy-docker` or `blacktirion/email-oauth2-proxy-docker` | The location/name of the image. This is published on both Github Container Repository as well as Docker Hub.|
+
+## Northwest Group fork
+
+This fork stays downstream of [blacktirion/email-oauth2-proxy-docker](https://github.com/blacktirion/email-oauth2-proxy-docker) and builds `ghcr.io/northwest-group/email-oauth2-proxy-docker` with plugin support.
+
+- **Proxy source**: `emailproxy.py` comes from the [`plugins` branch](https://github.com/simonrob/email-oauth2-proxy/tree/plugins) of simonrob/email-oauth2-proxy, pinned to the commit in [`.github/upstream.env`](.github/upstream.env).
+- **Plugins**: everything in [`plugins/`](plugins) is baked into the image at `/app/plugins`.
+  - `SMTPAddressRewriter` sends every message as `static_sender`, keeping the address the sending system used as the display name (`"system.A@example.com" <static_sender>`), and adds `Reply-To: reply_to` unless the message already has one.
+- **Upstream Sync** (daily, or run manually): merges new blacktirion commits and bumps the pinned proxy commit, runs the tests, then builds a new image. If the merge conflicts or tests fail, it opens a pull request from `upstream-sync` instead.
+- **Build and Push Docker Image**: runs on every push to `main`; tags `latest` and `YYYY.MM.DD.N`.
+
+Example plugin configuration in `emailproxy.config`:
+
+```ini
+[SMTP-1587]
+server_address = smtp.office365.com
+server_port = 587
+server_starttls = True
+local_address = 0.0.0.0
+plugins = {
+		'SMTPAddressRewriter': {'static_sender': 'noreply-integrations@thenorthwest.com', 'reply_to': 'edi@thenorthwest.com'}
+	}
+```

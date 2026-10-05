@@ -1,0 +1,81 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: build-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      packages: write
+
+    env:
+      IMAGE_NAME: ghcr.io/northwest-group/email-oauth2-proxy-docker
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Download upstream proxy (pinned plugins branch commit)
+        run: |
+          source .github/upstream.env
+          BASE="https://raw.githubusercontent.com/${EMAILPROXY_REPO}/${EMAILPROXY_REF}"
+          curl -fsSL -o emailproxy.py "$BASE/emailproxy.py"
+          curl -fsSL -o plugins/BasePlugin.py "$BASE/plugins/BasePlugin.py"
+
+      - name: Run plugin tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Set tags and build metadata
+        id: vars
+        run: |
+          git fetch --tags --force origin
+          DATE=$(date -u +%Y.%m.%d)
+          N=$(git tag -l "${DATE}.*" | sed "s/^${DATE}\.//" | grep -E '^[0-9]+$' | sort -n | tail -1)
+          VERSION="${DATE}.$(( ${N:-0} + 1 ))"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "short_sha=$(git rev-parse --short=7 HEAD)" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build image
+        run: |
+          source .github/upstream.env
+          docker build \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            --label org.opencontainers.image.version=${{ steps.vars.outputs.version }} \
+            --label org.opencontainers.image.revision=${{ steps.vars.outputs.short_sha }} \
+            --label org.opencontainers.image.created=${{ steps.vars.outputs.build_date }} \
+            --label emailproxy.ref=${EMAILPROXY_REF} \
+            --file Dockerfile \
+            --tag $IMAGE_NAME:latest \
+            --tag $IMAGE_NAME:${{ steps.vars.outputs.version }} \
+            .
+
+      - name: Push primary tag
+        run: docker push $IMAGE_NAME:latest
+
+      - name: Push version tag
+        run: docker push $IMAGE_NAME:${{ steps.vars.outputs.version }}
+
+      - name: Tag release in git
+        run: |
+          git tag "${{ steps.vars.outputs.version }}"
+          git push origin "${{ steps.vars.outputs.version }}"

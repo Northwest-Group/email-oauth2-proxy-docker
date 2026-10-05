@@ -15,8 +15,9 @@ RUN pip install --no-cache-dir \
     requests \
     pyjwt
 
-# Copy the Python script and shell script into the container
+# Copy the Python script (from the upstream plugins branch, downloaded by CI), plugins and shell script into the container
 COPY emailproxy.py /app/
+COPY plugins/ /app/plugins/
 COPY run_email_proxy.sh /app/
 
 # Make the shell script executable
