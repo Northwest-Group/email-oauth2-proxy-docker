@@ -1,5 +1,4 @@
 import enum
-import fnmatch
 import re
 
 import plugins.BasePlugin
@@ -14,10 +13,11 @@ REPLY_TO_HEADER_MATCHER = re.compile(br'^Reply-To:', re.IGNORECASE | re.MULTILIN
 ORIGINAL_FROM_HEADER_MATCHER = re.compile(br'^X-Original-From:', re.IGNORECASE | re.MULTILINE)
 SUBJECT_HEADER_MATCHER = re.compile(br'^Subject:[ \t]*', re.IGNORECASE | re.MULTILINE)
 
-# Outlook shows internal senders by their directory name rather than the From header's display name, so by default the
-# subject is also tagged with the sending system's address. Placeholders: {sender} (full address) and {user} (local part)
-DEFAULT_SUBJECT_PREFIX = '[{user}] '
-OVERRIDE_OPTIONS = {'rewrite', 'static_sender', 'reply_to', 'subject_prefix'}
+# Outlook shows internal senders by their directory name rather than the From header's display name, so senders can opt
+# in to a subject tag by ending the local part of their address with the label keyword: edihq-label@example.com tags the
+# subject as '[edihq] '. Prefix placeholders: {label} (local part without the keyword), {user} (local part), {sender}
+DEFAULT_LABEL_KEYWORD = '-label'
+DEFAULT_SUBJECT_PREFIX = '[{label}] '
 
 
 class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
@@ -27,22 +27,13 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         RCPT_TO = 3
         DATA = 4
 
-    def __init__(self, static_sender=None, reply_to=None, subject_prefix=DEFAULT_SUBJECT_PREFIX, overrides=None):
+    def __init__(self, static_sender=None, reply_to=None, label_keyword=DEFAULT_LABEL_KEYWORD,
+                 subject_prefix=DEFAULT_SUBJECT_PREFIX):
         super().__init__()
-        self.defaults = {'rewrite': True, 'static_sender': static_sender, 'reply_to': reply_to,
-                         'subject_prefix': subject_prefix}
-
-        # per-sender settings, keyed by address or wildcard pattern (e.g. '*@thenorthwest.com'); an exact address
-        # takes priority over patterns, then patterns are checked in the order given. Any option above can be
-        # overridden, and {'rewrite': False} passes the sender's messages through completely unchanged
-        self.overrides = []
-        for pattern, options in (overrides or {}).items():
-            unknown = set(options) - OVERRIDE_OPTIONS
-            if unknown:
-                raise ValueError('Unknown SMTPAddressRewriter override option(s) for %s: %s' % (pattern, unknown))
-            self.overrides.append((pattern.lower(), options))
-        self.overrides.sort(key=lambda override: any(c in override[0] for c in '*?['))  # stable: exact first
-
+        self.static_sender = static_sender.encode('utf-8') if static_sender else None
+        self.reply_to = reply_to.encode('utf-8') if reply_to else None
+        self.label_keyword = label_keyword.lower() if label_keyword else None
+        self.subject_prefix = subject_prefix or None  # '' (or None/False) disables subject tagging
         self.reset()
 
     def reset(self):
@@ -51,21 +42,6 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         self.original_sender = None
         self.header_processed = False
         self.header_buffer = b''
-        self.apply_settings(self.defaults)
-
-    def apply_settings(self, settings):
-        self.rewrite = settings.get('rewrite', True)
-        self.static_sender = settings['static_sender'].encode('utf-8') if settings.get('static_sender') else None
-        self.reply_to = settings['reply_to'].encode('utf-8') if settings.get('reply_to') else None
-        self.subject_prefix = settings.get('subject_prefix') or None  # '' (or None/False) disables the prefix
-
-    def settings_for(self, sender):
-        sender = sender.decode('utf-8', 'replace').lower()
-        for pattern, options in self.overrides:
-            if fnmatch.fnmatchcase(sender, pattern):
-                self.log_debug('Applying override', pattern, 'for sender', sender)
-                return {**self.defaults, **options}
-        return self.defaults
 
     def receive_from_client(self, byte_data):
         if self.sending_state == self.STATE.NONE:
@@ -109,13 +85,12 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         match = SMTP_MAIL_FROM_MATCHER.match(byte_data)
         if match:
             self.original_sender = match.group(1)
-            self.apply_settings(self.settings_for(self.original_sender))
-            if self.rewrite and self.static_sender:
+            if self.static_sender:
                 byte_data = b'MAIL FROM:<%b>%b\r\n' % (self.static_sender, match.group(2))  # keep SIZE= etc.
         return byte_data
 
     def replace_from_header(self, headers):
-        if not self.rewrite or not self.static_sender or not self.original_sender:
+        if not self.static_sender or not self.original_sender:
             return headers
 
         new_from = b'From: "' + self.original_sender + b'" <' + self.static_sender + b'>\r\n'
@@ -131,11 +106,13 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         return self.add_subject_prefix(headers)
 
     def add_subject_prefix(self, headers):
-        if not self.subject_prefix:
-            return headers
-
         sender = self.original_sender.decode('utf-8', 'replace')
-        prefix = self.subject_prefix.format(sender=sender, user=sender.split('@')[0]).encode('utf-8')
+        user = sender.rsplit('@', 1)[0]
+        if not self.subject_prefix or not self.label_keyword or not user.lower().endswith(self.label_keyword):
+            return headers  # only senders using a label address get a subject tag
+
+        label = user[:-len(self.label_keyword)]
+        prefix = self.subject_prefix.format(label=label, user=user, sender=sender).encode('utf-8')
         match = SUBJECT_HEADER_MATCHER.search(headers)
         if not match:
             return headers + b'Subject: ' + prefix.rstrip() + b'\r\n'

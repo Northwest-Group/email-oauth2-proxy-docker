@@ -93,9 +93,9 @@ This fork stays downstream of [blacktirion/email-oauth2-proxy-docker](https://gi
 - **Proxy source**: `emailproxy.py` comes from the [`plugins` branch](https://github.com/simonrob/email-oauth2-proxy/tree/plugins) of simonrob/email-oauth2-proxy, pinned to the commit in [`.github/upstream.env`](.github/upstream.env).
 - **Plugins**: everything in [`plugins/`](plugins) is baked into the image at `/app/plugins`.
   - `SMTPAddressRewriter` sends every message as `static_sender`, keeping the address the sending system used as the display name (`"system.A@example.com" <static_sender>`), and adds `Reply-To: reply_to` unless the message already has one.
-    It also adds `X-Original-From: <system.A@example.com>` and, because Outlook shows internal senders by their directory name instead of the display name, prefixes the subject (`[system.A] Subject`).
-    `subject_prefix` sets the format (`{user}` = local part, `{sender}` = full address; default `'[{user}] '`); set it to `''` to disable.
-  - `overrides` changes the behaviour for specific senders, keyed by address or wildcard pattern (exact addresses win, then patterns in order). Each entry can set `static_sender`, `reply_to` or `subject_prefix`, or `'rewrite': False` to pass that sender's messages through unchanged (the proxy account must be allowed to send as that address).
+    Every message is rewritten this way, and also gets `X-Original-From: <system.A@example.com>`.
+  - **Subject labels**: Outlook shows internal senders by their directory name instead of the display name, so a sending system can opt in to a subject tag by ending its address with the label keyword: `edihq-label@thenorthwest.com` sends `Subject: [edihq] ...`. Addresses without the keyword leave the subject unchanged.
+    `label_keyword` sets the keyword (default `'-label'`); `subject_prefix` sets the format (`{label}` = address part before the keyword, `{user}` = whole local part, `{sender}` = full address; default `'[{label}] '`), or `''` to disable.
 - **Upstream Sync** (daily, or run manually): merges new blacktirion commits and bumps the pinned proxy commit, runs the tests, then builds a new image. If the merge conflicts or tests fail, it opens a pull request from `upstream-sync` instead.
 - **Build and Push Docker Image**: runs on every push to `main` (except README/compose changes); tags `latest` and `YYYY.MM.DD.N`.
 - **Deploying**: [`compose.yaml`](compose.yaml) is ready to use as a git-based stack in Dockhand. The config directory (`/data/emailproxy/config`) stays on the host.
@@ -110,10 +110,6 @@ server_starttls = True
 local_address = 0.0.0.0
 plugins = {
 		'SMTPAddressRewriter': {'static_sender': 'noreply-integrations@thenorthwest.com', 'reply_to': 'edi@thenorthwest.com',
-		                        'subject_prefix': '[{user}] ',
-		                        'overrides': {
-		                            'noreply-integrations@thenorthwest.com': {'rewrite': False},
-		                            'edihq@thenorthwest.com': {'reply_to': 'edi-hq@thenorthwest.com', 'subject_prefix': '[HQ] '},
-		                            '*@scanners.local': {'subject_prefix': ''}}}
+		                        'label_keyword': '-label', 'subject_prefix': '[{label}] '}
 	}
 ```

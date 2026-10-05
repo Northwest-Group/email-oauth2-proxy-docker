@@ -14,6 +14,7 @@ from plugins.SMTPAddressRewriter import SMTPAddressRewriter  # noqa: E402
 
 STATIC_SENDER = 'noreply-integrations@thenorthwest.com'
 SYSTEM_SENDER = 'system.A.Box.2@cyx.com'
+LABEL_SENDER = 'edihq-label@thenorthwest.com'
 PDF = b'%PDF-1.4\n' + random.Random(0).randbytes(300_000) + b'\n%%EOF\n'
 
 
@@ -83,7 +84,7 @@ class TestSMTPAddressRewriter(unittest.TestCase):
         self.assertEqual(message['From'].addresses[0].display_name, SYSTEM_SENDER)
         self.assertEqual(message.get_all('Reply-To'), ['edi@thenorthwest.com'])
         self.assertEqual(message['X-Original-From'], '<%s>' % SYSTEM_SENDER)
-        self.assertEqual(message['Subject'], '[system.A.Box.2] Report')
+        self.assertEqual(message['Subject'], 'Report')  # no label keyword: rewritten, but subject untouched
         self.assertIn(b'From: a body line that must not be touched', output)
         self.assertEqual(output.count(b'From: "'), 1)
 
@@ -97,61 +98,54 @@ class TestSMTPAddressRewriter(unittest.TestCase):
         message = parse(send(plugin, build_message(), random_chunks()))
         self.assertIsNone(message['Reply-To'])
 
+    def label_message(self, plugin, subject='Report', sender=LABEL_SENDER):
+        mail_from = b'MAIL FROM:<%s>\r\n' % sender.encode()
+        output = send(plugin, build_message(subject=subject), random_chunks(), mail_from=mail_from)
+        self.assertTrue(output.startswith(b'MAIL FROM:<%s>\r\n' % STATIC_SENDER.encode()))  # always rewritten
+        return parse(output)
+
+    def test_label_address_tags_subject(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com')
+        message = self.label_message(plugin)
+        self.assertEqual(message['Subject'], '[edihq] Report')
+        self.assertEqual(message['From'].addresses[0].display_name, LABEL_SENDER)
+        self.assertEqual(message['X-Original-From'], '<%s>' % LABEL_SENDER)
+        self.assertEqual(message.get_all('Reply-To'), ['edi@thenorthwest.com'])
+
+    def test_label_keyword_case_insensitive(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
+        message = self.label_message(plugin, sender='EDIHQ-Label@thenorthwest.com')
+        self.assertEqual(message['Subject'], '[EDIHQ] Report')
+
+    def test_keyword_only_at_end_of_local_part(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
+        for sender in ('edihq@label.com', 'edi-labelhq@thenorthwest.com', 'edihq@thenorthwest-label.com'):
+            with self.subTest(sender):
+                self.assertEqual(self.label_message(plugin, sender=sender)['Subject'], 'Report')
+
+    def test_custom_keyword_and_format(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, label_keyword='+tag', subject_prefix='({label}) ')
+        self.assertEqual(self.label_message(plugin, sender='hq+tag@thenorthwest.com')['Subject'], '(hq) Report')
+        self.assertEqual(self.label_message(plugin)['Subject'], 'Report')
+
     def test_subject_prefix_disabled(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, subject_prefix='')
-        message = parse(send(plugin, build_message(), random_chunks()))
+        message = self.label_message(plugin)
         self.assertEqual(message['Subject'], 'Report')
-        self.assertEqual(message['X-Original-From'], '<%s>' % SYSTEM_SENDER)
-
-    def test_subject_prefix_custom_format(self):
-        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, subject_prefix='({sender}) ')
-        message = parse(send(plugin, build_message(), random_chunks()))
-        self.assertEqual(message['Subject'], '(%s) Report' % SYSTEM_SENDER)
+        self.assertEqual(message['From'].addresses[0].addr_spec, STATIC_SENDER)
 
     def test_subject_prefix_not_duplicated(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
-        message = parse(send(plugin, build_message(subject='[system.A.Box.2] Report'), random_chunks()))
-        self.assertEqual(message['Subject'], '[system.A.Box.2] Report')
+        self.assertEqual(self.label_message(plugin, subject='[edihq] Report')['Subject'], '[edihq] Report')
 
     def test_subject_added_when_missing(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
-        message = parse(send(plugin, build_message(subject=None), random_chunks()))
-        self.assertEqual(message['Subject'], '[system.A.Box.2]')
+        self.assertEqual(self.label_message(plugin, subject=None)['Subject'], '[edihq]')
 
     def test_encoded_and_folded_subject(self):
         subject = 'Rapport de livraison \u2013 ' + 'tr\u00e8s long sujet ' * 6
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
-        message = parse(send(plugin, build_message(subject=subject), random_chunks()))
-        self.assertEqual(message['Subject'], '[system.A.Box.2] ' + subject)
-
-    def test_override_passthrough(self):
-        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com',
-                                     overrides={SYSTEM_SENDER.upper(): {'rewrite': False}})
-        original = build_message()
-        output = send(plugin, original, random_chunks())
-        self.assertTrue(output.startswith(b'MAIL FROM:<%s>\r\n' % SYSTEM_SENDER.encode()))
-        self.assertIn(original, output)  # message passed through byte-for-byte
-
-    def test_override_options(self):
-        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com', overrides={
-            '*@cyx.com': {'reply_to': 'pattern@thenorthwest.com'},
-            SYSTEM_SENDER: {'reply_to': 'hq@thenorthwest.com', 'subject_prefix': ''}})
-        message = parse(send(plugin, build_message(), random_chunks()))
-        self.assertEqual(message.get_all('Reply-To'), ['hq@thenorthwest.com'])  # exact address beats pattern
-        self.assertEqual(message['Subject'], 'Report')
-        self.assertEqual(message['From'].addresses[0].addr_spec, STATIC_SENDER)
-
-    def test_override_pattern_and_reset(self):
-        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, overrides={'*@cyx.com': {'subject_prefix': '[CYX] '}})
-        chunks = random_chunks()
-        message = parse(send(plugin, build_message(), chunks))
-        self.assertEqual(message['Subject'], '[CYX] Report')
-        other = parse(send(plugin, build_message(), chunks, mail_from=b'MAIL FROM:<scanner@printer.local>\r\n'))
-        self.assertEqual(other['Subject'], '[scanner] Report')  # defaults restored for the next message
-
-    def test_override_unknown_option(self):
-        with self.assertRaises(ValueError):
-            SMTPAddressRewriter(static_sender=STATIC_SENDER, overrides={SYSTEM_SENDER: {'replyto': 'x@y.z'}})
+        self.assertEqual(self.label_message(plugin, subject=subject)['Subject'], '[edihq] ' + subject)
 
     def test_mail_from_parameters_kept(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
