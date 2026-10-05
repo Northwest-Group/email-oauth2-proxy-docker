@@ -1,5 +1,7 @@
-import re
 import enum
+import fnmatch
+import re
+
 import plugins.BasePlugin
 
 SMTP_MAIL_FROM_MATCHER = re.compile(b'MAIL FROM:<(.*?)>(.*)\r\n', re.IGNORECASE)
@@ -15,6 +17,7 @@ SUBJECT_HEADER_MATCHER = re.compile(br'^Subject:[ \t]*', re.IGNORECASE | re.MULT
 # Outlook shows internal senders by their directory name rather than the From header's display name, so by default the
 # subject is also tagged with the sending system's address. Placeholders: {sender} (full address) and {user} (local part)
 DEFAULT_SUBJECT_PREFIX = '[{user}] '
+OVERRIDE_OPTIONS = {'rewrite', 'static_sender', 'reply_to', 'subject_prefix'}
 
 
 class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
@@ -24,11 +27,22 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         RCPT_TO = 3
         DATA = 4
 
-    def __init__(self, static_sender=None, reply_to=None, subject_prefix=DEFAULT_SUBJECT_PREFIX):
+    def __init__(self, static_sender=None, reply_to=None, subject_prefix=DEFAULT_SUBJECT_PREFIX, overrides=None):
         super().__init__()
-        self.static_sender = static_sender.encode('utf-8') if static_sender else None
-        self.reply_to = reply_to.encode('utf-8') if reply_to else None
-        self.subject_prefix = subject_prefix or None  # set to '' (or None/False) to disable
+        self.defaults = {'rewrite': True, 'static_sender': static_sender, 'reply_to': reply_to,
+                         'subject_prefix': subject_prefix}
+
+        # per-sender settings, keyed by address or wildcard pattern (e.g. '*@thenorthwest.com'); an exact address
+        # takes priority over patterns, then patterns are checked in the order given. Any option above can be
+        # overridden, and {'rewrite': False} passes the sender's messages through completely unchanged
+        self.overrides = []
+        for pattern, options in (overrides or {}).items():
+            unknown = set(options) - OVERRIDE_OPTIONS
+            if unknown:
+                raise ValueError('Unknown SMTPAddressRewriter override option(s) for %s: %s' % (pattern, unknown))
+            self.overrides.append((pattern.lower(), options))
+        self.overrides.sort(key=lambda override: any(c in override[0] for c in '*?['))  # stable: exact first
+
         self.reset()
 
     def reset(self):
@@ -37,6 +51,21 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         self.original_sender = None
         self.header_processed = False
         self.header_buffer = b''
+        self.apply_settings(self.defaults)
+
+    def apply_settings(self, settings):
+        self.rewrite = settings.get('rewrite', True)
+        self.static_sender = settings['static_sender'].encode('utf-8') if settings.get('static_sender') else None
+        self.reply_to = settings['reply_to'].encode('utf-8') if settings.get('reply_to') else None
+        self.subject_prefix = settings.get('subject_prefix') or None  # '' (or None/False) disables the prefix
+
+    def settings_for(self, sender):
+        sender = sender.decode('utf-8', 'replace').lower()
+        for pattern, options in self.overrides:
+            if fnmatch.fnmatchcase(sender, pattern):
+                self.log_debug('Applying override', pattern, 'for sender', sender)
+                return {**self.defaults, **options}
+        return self.defaults
 
     def receive_from_client(self, byte_data):
         if self.sending_state == self.STATE.NONE:
@@ -80,12 +109,13 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         match = SMTP_MAIL_FROM_MATCHER.match(byte_data)
         if match:
             self.original_sender = match.group(1)
-            if self.static_sender:
+            self.apply_settings(self.settings_for(self.original_sender))
+            if self.rewrite and self.static_sender:
                 byte_data = b'MAIL FROM:<%b>%b\r\n' % (self.static_sender, match.group(2))  # keep SIZE= etc.
         return byte_data
 
     def replace_from_header(self, headers):
-        if not self.static_sender or not self.original_sender:
+        if not self.rewrite or not self.static_sender or not self.original_sender:
             return headers
 
         new_from = b'From: "' + self.original_sender + b'" <' + self.static_sender + b'>\r\n'

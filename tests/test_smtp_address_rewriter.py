@@ -124,6 +124,35 @@ class TestSMTPAddressRewriter(unittest.TestCase):
         message = parse(send(plugin, build_message(subject=subject), random_chunks()))
         self.assertEqual(message['Subject'], '[system.A.Box.2] ' + subject)
 
+    def test_override_passthrough(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com',
+                                     overrides={SYSTEM_SENDER.upper(): {'rewrite': False}})
+        original = build_message()
+        output = send(plugin, original, random_chunks())
+        self.assertTrue(output.startswith(b'MAIL FROM:<%s>\r\n' % SYSTEM_SENDER.encode()))
+        self.assertIn(original, output)  # message passed through byte-for-byte
+
+    def test_override_options(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com', overrides={
+            '*@cyx.com': {'reply_to': 'pattern@thenorthwest.com'},
+            SYSTEM_SENDER: {'reply_to': 'hq@thenorthwest.com', 'subject_prefix': ''}})
+        message = parse(send(plugin, build_message(), random_chunks()))
+        self.assertEqual(message.get_all('Reply-To'), ['hq@thenorthwest.com'])  # exact address beats pattern
+        self.assertEqual(message['Subject'], 'Report')
+        self.assertEqual(message['From'].addresses[0].addr_spec, STATIC_SENDER)
+
+    def test_override_pattern_and_reset(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, overrides={'*@cyx.com': {'subject_prefix': '[CYX] '}})
+        chunks = random_chunks()
+        message = parse(send(plugin, build_message(), chunks))
+        self.assertEqual(message['Subject'], '[CYX] Report')
+        other = parse(send(plugin, build_message(), chunks, mail_from=b'MAIL FROM:<scanner@printer.local>\r\n'))
+        self.assertEqual(other['Subject'], '[scanner] Report')  # defaults restored for the next message
+
+    def test_override_unknown_option(self):
+        with self.assertRaises(ValueError):
+            SMTPAddressRewriter(static_sender=STATIC_SENDER, overrides={SYSTEM_SENDER: {'replyto': 'x@y.z'}})
+
     def test_mail_from_parameters_kept(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
         output = send(plugin, build_message(), random_chunks(),
