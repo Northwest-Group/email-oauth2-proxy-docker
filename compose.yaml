@@ -4,6 +4,9 @@ services:
     image: ghcr.io/northwest-group/email-oauth2-proxy-docker:${IMAGE_TAG:-latest}
     container_name: emailproxy
     restart: unless-stopped
+    labels:
+      # updates are handled by Dockhand, not Watchtower
+      com.centurylinklabs.watchtower.enable: "false"
     environment:
       LOGFILE: ${LOGFILE:-true}
       DEBUG: ${DEBUG:-false}
