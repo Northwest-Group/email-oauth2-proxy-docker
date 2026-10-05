@@ -94,7 +94,8 @@ This fork stays downstream of [blacktirion/email-oauth2-proxy-docker](https://gi
 - **Plugins**: everything in [`plugins/`](plugins) is baked into the image at `/app/plugins`.
   - `SMTPAddressRewriter` sends every message as `static_sender`, keeping the address the sending system used as the display name (`"system.A@example.com" <static_sender>`), and adds `Reply-To: reply_to` unless the message already has one.
 - **Upstream Sync** (daily, or run manually): merges new blacktirion commits and bumps the pinned proxy commit, runs the tests, then builds a new image. If the merge conflicts or tests fail, it opens a pull request from `upstream-sync` instead.
-- **Build and Push Docker Image**: runs on every push to `main`; tags `latest` and `YYYY.MM.DD.N`.
+- **Build and Push Docker Image**: runs on every push to `main` (except README/compose changes); tags `latest` and `YYYY.MM.DD.N`.
+- **Deploying**: [`compose.yaml`](compose.yaml) is ready to use as a git-based stack in Dockhand. The config directory (`CONFIG_PATH`, default `/data/emailproxy/config`) stays on the host; set `IMAGE_TAG` to pin a version.
 
 Example plugin configuration in `emailproxy.config`:
 

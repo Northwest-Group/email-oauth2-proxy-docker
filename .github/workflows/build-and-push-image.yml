@@ -6,6 +6,7 @@ on:
       - main
     paths-ignore:
       - 'README.md'
+      - 'compose.yaml'
   workflow_dispatch:
   workflow_call:
 
