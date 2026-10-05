@@ -9,6 +9,12 @@ HEADER_END = b'\r\n\r\n'
 # match a whole header including any folded continuation lines
 FROM_HEADER_MATCHER = re.compile(br'^From:.*\r\n(?:[ \t].*\r\n)*', re.IGNORECASE | re.MULTILINE)
 REPLY_TO_HEADER_MATCHER = re.compile(br'^Reply-To:', re.IGNORECASE | re.MULTILINE)
+ORIGINAL_FROM_HEADER_MATCHER = re.compile(br'^X-Original-From:', re.IGNORECASE | re.MULTILINE)
+SUBJECT_HEADER_MATCHER = re.compile(br'^Subject:[ \t]*', re.IGNORECASE | re.MULTILINE)
+
+# Outlook shows internal senders by their directory name rather than the From header's display name, so by default the
+# subject is also tagged with the sending system's address. Placeholders: {sender} (full address) and {user} (local part)
+DEFAULT_SUBJECT_PREFIX = '[{user}] '
 
 
 class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
@@ -18,10 +24,11 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         RCPT_TO = 3
         DATA = 4
 
-    def __init__(self, static_sender=None, reply_to=None):
+    def __init__(self, static_sender=None, reply_to=None, subject_prefix=DEFAULT_SUBJECT_PREFIX):
         super().__init__()
         self.static_sender = static_sender.encode('utf-8') if static_sender else None
         self.reply_to = reply_to.encode('utf-8') if reply_to else None
+        self.subject_prefix = subject_prefix or None  # set to '' (or None/False) to disable
         self.reset()
 
     def reset(self):
@@ -84,10 +91,27 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         new_from = b'From: "' + self.original_sender + b'" <' + self.static_sender + b'>\r\n'
         if self.reply_to and not REPLY_TO_HEADER_MATCHER.search(headers):  # keep a Reply-To set by the sending system
             new_from += b'Reply-To: <' + self.reply_to + b'>\r\n'
+        if not ORIGINAL_FROM_HEADER_MATCHER.search(headers):
+            new_from += b'X-Original-From: <' + self.original_sender + b'>\r\n'
 
         if FROM_HEADER_MATCHER.search(headers):
-            return FROM_HEADER_MATCHER.sub(lambda _: new_from, headers, count=1)
-        return new_from + headers
+            headers = FROM_HEADER_MATCHER.sub(lambda _: new_from, headers, count=1)
+        else:
+            headers = new_from + headers
+        return self.add_subject_prefix(headers)
+
+    def add_subject_prefix(self, headers):
+        if not self.subject_prefix:
+            return headers
+
+        sender = self.original_sender.decode('utf-8', 'replace')
+        prefix = self.subject_prefix.format(sender=sender, user=sender.split('@')[0]).encode('utf-8')
+        match = SUBJECT_HEADER_MATCHER.search(headers)
+        if not match:
+            return headers + b'Subject: ' + prefix.rstrip() + b'\r\n'
+        if headers[match.end():].startswith(prefix):  # already tagged (e.g. a resend)
+            return headers
+        return headers[:match.end()] + prefix + headers[match.end():]
 
     def receive_from_server(self, byte_data):
         return byte_data

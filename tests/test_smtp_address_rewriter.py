@@ -17,11 +17,12 @@ SYSTEM_SENDER = 'system.A.Box.2@cyx.com'
 PDF = b'%PDF-1.4\n' + random.Random(0).randbytes(300_000) + b'\n%%EOF\n'
 
 
-def build_message(reply_to=None):
+def build_message(reply_to=None, subject='Report'):
     message = EmailMessage()
     message['From'] = 'System A <%s>' % SYSTEM_SENDER
     message['To'] = 'someone@example.com'
-    message['Subject'] = 'Report'
+    if subject is not None:
+        message['Subject'] = subject
     if reply_to:
         message['Reply-To'] = reply_to
     message.set_content('See attached.\n\nFrom: a body line that must not be touched\n')
@@ -81,6 +82,8 @@ class TestSMTPAddressRewriter(unittest.TestCase):
         self.assertEqual(message['From'].addresses[0].addr_spec, STATIC_SENDER)
         self.assertEqual(message['From'].addresses[0].display_name, SYSTEM_SENDER)
         self.assertEqual(message.get_all('Reply-To'), ['edi@thenorthwest.com'])
+        self.assertEqual(message['X-Original-From'], '<%s>' % SYSTEM_SENDER)
+        self.assertEqual(message['Subject'], '[system.A.Box.2] Report')
         self.assertIn(b'From: a body line that must not be touched', output)
         self.assertEqual(output.count(b'From: "'), 1)
 
@@ -93,6 +96,33 @@ class TestSMTPAddressRewriter(unittest.TestCase):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
         message = parse(send(plugin, build_message(), random_chunks()))
         self.assertIsNone(message['Reply-To'])
+
+    def test_subject_prefix_disabled(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, subject_prefix='')
+        message = parse(send(plugin, build_message(), random_chunks()))
+        self.assertEqual(message['Subject'], 'Report')
+        self.assertEqual(message['X-Original-From'], '<%s>' % SYSTEM_SENDER)
+
+    def test_subject_prefix_custom_format(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, subject_prefix='({sender}) ')
+        message = parse(send(plugin, build_message(), random_chunks()))
+        self.assertEqual(message['Subject'], '(%s) Report' % SYSTEM_SENDER)
+
+    def test_subject_prefix_not_duplicated(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
+        message = parse(send(plugin, build_message(subject='[system.A.Box.2] Report'), random_chunks()))
+        self.assertEqual(message['Subject'], '[system.A.Box.2] Report')
+
+    def test_subject_added_when_missing(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
+        message = parse(send(plugin, build_message(subject=None), random_chunks()))
+        self.assertEqual(message['Subject'], '[system.A.Box.2]')
+
+    def test_encoded_and_folded_subject(self):
+        subject = 'Rapport de livraison \u2013 ' + 'tr\u00e8s long sujet ' * 6
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
+        message = parse(send(plugin, build_message(subject=subject), random_chunks()))
+        self.assertEqual(message['Subject'], '[system.A.Box.2] ' + subject)
 
     def test_mail_from_parameters_kept(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
