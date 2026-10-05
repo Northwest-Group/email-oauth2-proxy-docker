@@ -1,7 +1,6 @@
-# Deployable stack (e.g. as a git-based stack in Dockhand). Override any ${VARIABLE} in the stack's environment.
 services:
   emailproxy:
-    image: ghcr.io/northwest-group/email-oauth2-proxy-docker:${IMAGE_TAG:-latest}
+    image: ghcr.io/northwest-group/email-oauth2-proxy-docker:latest
     container_name: emailproxy
     restart: unless-stopped
     labels:
@@ -14,6 +13,6 @@ services:
       LOCAL_SERVER_AUTH: ${LOCAL_SERVER_AUTH:-true}
     volumes:
       # emailproxy.config, credstore.config and logs live here - keep this outside the repo
-      - ${CONFIG_PATH:-/data/emailproxy/config}:/config
+      - /data/emailproxy/config:/config
     ports:
-      - ${SMTP_PORT:-25}:1587
+      - 25:1587
