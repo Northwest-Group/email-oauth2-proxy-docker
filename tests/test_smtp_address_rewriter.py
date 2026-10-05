@@ -18,10 +18,12 @@ LABEL_SENDER = 'edihq-label@thenorthwest.com'
 PDF = b'%PDF-1.4\n' + random.Random(0).randbytes(300_000) + b'\n%%EOF\n'
 
 
-def build_message(reply_to=None, subject='Report'):
+def build_message(reply_to=None, subject='Report', to='someone@example.com', cc=None):
     message = EmailMessage()
     message['From'] = 'System A <%s>' % SYSTEM_SENDER
-    message['To'] = 'someone@example.com'
+    message['To'] = to
+    if cc:
+        message['Cc'] = cc
     if subject is not None:
         message['Subject'] = subject
     if reply_to:
@@ -32,14 +34,15 @@ def build_message(reply_to=None, subject='Report'):
     return raw + b'.\r\n'
 
 
-def send(plugin, message, chunk_sizes, mail_from=b'MAIL FROM:<%s>\r\n' % SYSTEM_SENDER.encode()):
+def send(plugin, message, chunk_sizes, mail_from=b'MAIL FROM:<%s>\r\n' % SYSTEM_SENDER.encode(),
+         rcpt_to=(b'RCPT TO:<someone@example.com>\r\n',)):
     output = b''
 
     def receive(byte_data):
         nonlocal output
         output += plugin.receive_from_client(byte_data) or b''
 
-    for command in (mail_from, b'RCPT TO:<someone@example.com>\r\n', b'DATA\r\n'):
+    for command in (mail_from, *rcpt_to, b'DATA\r\n'):
         receive(command)
     position = 0
     while position < len(message):
@@ -152,8 +155,8 @@ class TestSMTPAddressRewriter(unittest.TestCase):
         logged = []
         plugin.log_info = lambda *args: logged.append(' '.join(str(a) for a in args))
         self.label_message(plugin)
-        self.assertEqual(logged, ['Rewrote sender <%s> as <%s>; Reply-To: <edi@thenorthwest.com>; subject tagged: '
-                                  '[edihq] Report' % (LABEL_SENDER, STATIC_SENDER)])
+        self.assertEqual(logged, ['Rewrote sender <%s> as <%s>; to: someone@example.com; Reply-To: '
+                                  '<edi@thenorthwest.com>; subject tagged: [edihq] Report' % (LABEL_SENDER, STATIC_SENDER)])
 
     def test_mail_from_with_space(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
@@ -169,6 +172,43 @@ class TestSMTPAddressRewriter(unittest.TestCase):
         self.assertEqual(plugin.receive_from_client(b'MAIL FROM:someone@example.com\r\n'),
                          b'MAIL FROM:someone@example.com\r\n')
         self.assertEqual(len(logged), 1)
+
+    def test_label_recipient_redirected(self):
+        # VLTrader sends to its own (label) From address; that mailbox does not exist, so redirect it to reply_to
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com')
+        logged = []
+        plugin.log_info = lambda *args: logged.append(' '.join(str(a) for a in args))
+        output = send(plugin, build_message(to='<%s>' % LABEL_SENDER, cc='Bob <bob@example.com>'), random_chunks(),
+                      mail_from=b'MAIL FROM:<%s>\r\n' % LABEL_SENDER.encode(),
+                      rcpt_to=(b'RCPT TO:<%s>\r\n' % LABEL_SENDER.encode(), b'RCPT TO: <bob@example.com> NOTIFY=NEVER\r\n'))
+        self.assertIn(b'\r\nRCPT TO:<edi@thenorthwest.com>\r\n', output)
+        self.assertIn(b'\r\nRCPT TO: <bob@example.com> NOTIFY=NEVER\r\n', output)
+        self.assertNotIn(b'RCPT TO:<%s>' % LABEL_SENDER.encode(), output)
+        message = parse(output)
+        self.assertEqual(message['To'].addresses[0].addr_spec, 'edi@thenorthwest.com')
+        self.assertEqual(message['Cc'].addresses[0].addr_spec, 'bob@example.com')
+        self.assertEqual(message['From'].addresses[0].display_name, LABEL_SENDER)  # From label unchanged
+        self.assertEqual(next(message.iter_attachments()).get_content(), PDF)
+        self.assertIn('to: edi@thenorthwest.com (redirected from %s), bob@example.com;' % LABEL_SENDER, logged[0])
+
+    def test_label_recipient_explicit_and_disabled(self):
+        rcpt = (b'RCPT TO:<%s>\r\n' % LABEL_SENDER.encode(),)
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com',
+                                     label_recipient='alerts@thenorthwest.com')
+        output = send(plugin, build_message(to=LABEL_SENDER), random_chunks(), rcpt_to=rcpt)
+        self.assertIn(b'RCPT TO:<alerts@thenorthwest.com>\r\n', output)
+        self.assertEqual(parse(output)['To'], 'alerts@thenorthwest.com')
+
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com', label_recipient='')
+        output = send(plugin, build_message(to=LABEL_SENDER), random_chunks(), rcpt_to=rcpt)
+        self.assertIn(b'RCPT TO:<%s>\r\n' % LABEL_SENDER.encode(), output)
+
+    def test_real_recipients_untouched(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com')
+        output = send(plugin, build_message(to='label@example.com, edi-labels@example.com'), random_chunks(),
+                      rcpt_to=(b'RCPT TO:<label@example.com>\r\n', b'RCPT TO:<edi-labels@example.com>\r\n'))
+        self.assertIn(b'RCPT TO:<label@example.com>\r\nRCPT TO:<edi-labels@example.com>\r\n', output)
+        self.assertEqual(parse(output)['To'], 'label@example.com, edi-labels@example.com')
 
     def test_mail_from_parameters_kept(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)

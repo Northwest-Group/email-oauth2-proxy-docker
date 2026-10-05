@@ -4,7 +4,7 @@ import re
 import plugins.BasePlugin
 
 SMTP_MAIL_FROM_MATCHER = re.compile(b'MAIL FROM: ?<(.*?)>(.*)\r\n', re.IGNORECASE)
-SMTP_RCPT_TO_MATCHER = re.compile(b'RCPT TO:.+\r\n', re.IGNORECASE)
+SMTP_RCPT_TO_MATCHER = re.compile(b'RCPT TO: ?<(.*?)>(.*)\r\n', re.IGNORECASE)
 
 HEADER_END = b'\r\n\r\n'
 # match a whole header including any folded continuation lines
@@ -12,12 +12,17 @@ FROM_HEADER_MATCHER = re.compile(br'^From:.*\r\n(?:[ \t].*\r\n)*', re.IGNORECASE
 REPLY_TO_HEADER_MATCHER = re.compile(br'^Reply-To:', re.IGNORECASE | re.MULTILINE)
 ORIGINAL_FROM_HEADER_MATCHER = re.compile(br'^X-Original-From:', re.IGNORECASE | re.MULTILINE)
 SUBJECT_HEADER_MATCHER = re.compile(br'^Subject:[ \t]*', re.IGNORECASE | re.MULTILINE)
+RECIPIENT_HEADER_MATCHER = re.compile(br'^(?:To|Cc):.*\r\n(?:[ \t].*\r\n)*', re.IGNORECASE | re.MULTILINE)
+ADDRESS_MATCHER = re.compile(br'[^\s<>,;:"\'()]+@[^\s<>,;:"\'()]+')
 
 # Outlook shows internal senders by their directory name rather than the From header's display name, so senders can opt
 # in to a subject tag by ending the local part of their address with the label keyword: edihq-label@example.com tags the
 # subject as '[edihq] '. Prefix placeholders: {label} (local part without the keyword), {user} (local part), {sender}
 DEFAULT_LABEL_KEYWORD = '-label'
 DEFAULT_SUBJECT_PREFIX = '[{label}] '
+
+# Label addresses are not real mailboxes, so mail addressed *to* one can never be delivered. Some systems (e.g. VLTrader)
+# always send to their own From address, so any label recipient is redirected to label_recipient (default: reply_to)
 
 
 class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
@@ -28,18 +33,22 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         DATA = 4
 
     def __init__(self, static_sender=None, reply_to=None, label_keyword=DEFAULT_LABEL_KEYWORD,
-                 subject_prefix=DEFAULT_SUBJECT_PREFIX):
+                 subject_prefix=DEFAULT_SUBJECT_PREFIX, label_recipient=None):
         super().__init__()
         self.static_sender = static_sender.encode('utf-8') if static_sender else None
         self.reply_to = reply_to.encode('utf-8') if reply_to else None
         self.label_keyword = label_keyword.lower() if label_keyword else None
         self.subject_prefix = subject_prefix or None  # '' (or None/False) disables subject tagging
+        if label_recipient is None:
+            label_recipient = reply_to
+        self.label_recipient = label_recipient.encode('utf-8') if label_recipient else None  # '' disables redirects
         self.reset()
 
     def reset(self):
         self.sending_state = self.STATE.NONE
         self.previous_line_ended = False
         self.original_sender = None
+        self.recipients = []
         self.header_processed = False
         self.header_buffer = b''
 
@@ -55,12 +64,11 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         if len(byte_data) == 6 and byte_data.lower() == b'rset\r\n':
             self.reset()
 
-        elif self.sending_state == self.STATE.MAIL_FROM:
+        elif self.sending_state in (self.STATE.MAIL_FROM, self.STATE.RCPT_TO):
             if SMTP_RCPT_TO_MATCHER.match(byte_data):
                 self.sending_state = self.STATE.RCPT_TO
-
-        elif self.sending_state == self.STATE.RCPT_TO:
-            if byte_data.lower() == b'data\r\n':
+                byte_data = self.replace_rcpt_to(byte_data)
+            elif self.sending_state == self.STATE.RCPT_TO and byte_data.lower() == b'data\r\n':
                 self.sending_state = self.STATE.DATA
 
         elif self.sending_state == self.STATE.DATA:
@@ -91,6 +99,30 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
                 byte_data = b'MAIL FROM:<%b>%b\r\n' % (self.static_sender, match.group(2))  # keep SIZE= etc.
         return byte_data
 
+    def is_label_address(self, address):
+        user = address.rsplit(b'@', 1)[0].decode('utf-8', 'replace').lower()
+        return bool(self.label_keyword) and b'@' in address and user.endswith(self.label_keyword)
+
+    def replace_rcpt_to(self, byte_data):
+        match = SMTP_RCPT_TO_MATCHER.match(byte_data)
+        recipient = match.group(1)
+        if self.label_recipient and self.is_label_address(recipient):
+            self.recipients.append('%s (redirected from %s)' % (
+                self.label_recipient.decode('utf-8', 'replace'), recipient.decode('utf-8', 'replace')))
+            return b'RCPT TO:<%b>%b\r\n' % (self.label_recipient, match.group(2))
+        self.recipients.append(recipient.decode('utf-8', 'replace'))
+        return byte_data
+
+    def replace_recipient_headers(self, headers):
+        if not self.label_recipient:
+            return headers
+
+        def replace_addresses(header):
+            return ADDRESS_MATCHER.sub(
+                lambda a: self.label_recipient if self.is_label_address(a.group(0)) else a.group(0), header.group(0))
+
+        return RECIPIENT_HEADER_MATCHER.sub(replace_addresses, headers)
+
     def replace_from_header(self, headers):
         if not self.static_sender or not self.original_sender:
             return headers
@@ -108,12 +140,14 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         else:
             headers = new_from + headers
 
+        headers = self.replace_recipient_headers(headers)
         tagged_headers = self.add_subject_prefix(headers)
         subject = SUBJECT_HEADER_MATCHER.search(tagged_headers)
         subject = tagged_headers[subject.end():].split(b'\r\n', 1)[0].decode('utf-8', 'replace') if subject else ''
-        self.log_info('Rewrote sender <%s> as <%s>; Reply-To: %s; subject %s: %s' % (
-            self.original_sender.decode('utf-8', 'replace'), self.static_sender.decode('utf-8', 'replace'), reply_to,
-            'tagged' if tagged_headers != headers else 'unchanged', subject))
+        self.log_info('Rewrote sender <%s> as <%s>; to: %s; Reply-To: %s; subject %s: %s' % (
+            self.original_sender.decode('utf-8', 'replace'), self.static_sender.decode('utf-8', 'replace'),
+            ', '.join(self.recipients) or 'none', reply_to, 'tagged' if tagged_headers != headers else 'unchanged',
+            subject))
         return tagged_headers
 
     def add_subject_prefix(self, headers):
