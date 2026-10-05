@@ -147,6 +147,29 @@ class TestSMTPAddressRewriter(unittest.TestCase):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
         self.assertEqual(self.label_message(plugin, subject=subject)['Subject'], '[edihq] ' + subject)
 
+    def test_logs_each_rewrite(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com')
+        logged = []
+        plugin.log_info = lambda *args: logged.append(' '.join(str(a) for a in args))
+        self.label_message(plugin)
+        self.assertEqual(logged, ['Rewrote sender <%s> as <%s>; Reply-To: <edi@thenorthwest.com>; subject tagged: '
+                                  '[edihq] Report' % (LABEL_SENDER, STATIC_SENDER)])
+
+    def test_mail_from_with_space(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
+        output = send(plugin, build_message(), random_chunks(),
+                      mail_from=b'MAIL FROM: <%s>\r\n' % LABEL_SENDER.encode())
+        self.assertTrue(output.startswith(b'MAIL FROM:<%s>\r\n' % STATIC_SENDER.encode()))
+        self.assertEqual(parse(output)['Subject'], '[edihq] Report')
+
+    def test_unrecognised_mail_from_logged(self):
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
+        logged = []
+        plugin.log_info = lambda *args: logged.append(args)
+        self.assertEqual(plugin.receive_from_client(b'MAIL FROM:someone@example.com\r\n'),
+                         b'MAIL FROM:someone@example.com\r\n')
+        self.assertEqual(len(logged), 1)
+
     def test_mail_from_parameters_kept(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)
         output = send(plugin, build_message(), random_chunks(),

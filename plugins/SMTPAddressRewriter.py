@@ -3,7 +3,7 @@ import re
 
 import plugins.BasePlugin
 
-SMTP_MAIL_FROM_MATCHER = re.compile(b'MAIL FROM:<(.*?)>(.*)\r\n', re.IGNORECASE)
+SMTP_MAIL_FROM_MATCHER = re.compile(b'MAIL FROM: ?<(.*?)>(.*)\r\n', re.IGNORECASE)
 SMTP_RCPT_TO_MATCHER = re.compile(b'RCPT TO:.+\r\n', re.IGNORECASE)
 
 HEADER_END = b'\r\n\r\n'
@@ -48,6 +48,8 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
             if SMTP_MAIL_FROM_MATCHER.match(byte_data):
                 self.sending_state = self.STATE.MAIL_FROM
                 return self.replace_mail_from(byte_data)
+            if byte_data[:10].upper() == b'MAIL FROM:':
+                self.log_info('Unrecognised MAIL FROM command - message will not be rewritten:', byte_data)
             return byte_data
 
         if len(byte_data) == 6 and byte_data.lower() == b'rset\r\n':
@@ -99,11 +101,20 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         if not ORIGINAL_FROM_HEADER_MATCHER.search(headers):
             new_from += b'X-Original-From: <' + self.original_sender + b'>\r\n'
 
+        reply_to = 'kept existing' if REPLY_TO_HEADER_MATCHER.search(headers) else (
+            '<%s>' % self.reply_to.decode('utf-8', 'replace') if self.reply_to else 'none')
         if FROM_HEADER_MATCHER.search(headers):
             headers = FROM_HEADER_MATCHER.sub(lambda _: new_from, headers, count=1)
         else:
             headers = new_from + headers
-        return self.add_subject_prefix(headers)
+
+        tagged_headers = self.add_subject_prefix(headers)
+        subject = SUBJECT_HEADER_MATCHER.search(tagged_headers)
+        subject = tagged_headers[subject.end():].split(b'\r\n', 1)[0].decode('utf-8', 'replace') if subject else ''
+        self.log_info('Rewrote sender <%s> as <%s>; Reply-To: %s; subject %s: %s' % (
+            self.original_sender.decode('utf-8', 'replace'), self.static_sender.decode('utf-8', 'replace'), reply_to,
+            'tagged' if tagged_headers != headers else 'unchanged', subject))
+        return tagged_headers
 
     def add_subject_prefix(self, headers):
         sender = self.original_sender.decode('utf-8', 'replace')
