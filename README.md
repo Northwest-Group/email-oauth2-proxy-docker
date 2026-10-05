@@ -96,7 +96,7 @@ This fork stays downstream of [blacktirion/email-oauth2-proxy-docker](https://gi
     Every message is rewritten this way, and also gets `X-Original-From: <system.A@example.com>`.
   - **Subject labels**: Outlook shows internal senders by their directory name instead of the display name, so a sending system can opt in to a subject tag by ending its address with the label keyword: `edihq-label@thenorthwest.com` sends `Subject: [edihq] ...`. Addresses without the keyword leave the subject unchanged.
     `label_keyword` sets the keyword (default `'-label'`); `subject_prefix` sets the format (`{label}` = address part before the keyword, `{user}` = whole local part, `{sender}` = full address; default `'[{label}] '`), or `''` to disable.
-  - **Label recipients**: label addresses are not real mailboxes, so any recipient that is one (e.g. VLTrader, which always sends to its own From address) is redirected, in both `RCPT TO` and the `To`/`Cc` headers, to `label_recipient` (default: `reply_to`; `''` to disable). Real recipients are never changed.
+  - **Recipient redirects**: `recipient_redirects` maps specific recipient addresses to replacements, in both `RCPT TO` and the `To`/`Cc` headers, for systems that cannot set their recipients correctly. VLTrader always sends to its own From address, so `{'VLTrader-label@thenorthwest.com': 'edi@thenorthwest.com'}` sends its alerts to EDI. Only listed addresses are changed (case-insensitive); none by default.
   - Each message is logged as `Rewrote sender <...> as <...>; to: ...; Reply-To: ...; subject tagged|unchanged: ...`.
 - **Upstream Sync** (daily, or run manually): merges new blacktirion commits and bumps the pinned proxy commit, runs the tests, then builds a new image. If the merge conflicts or tests fail, it opens a pull request from `upstream-sync` instead.
 - **Build and Push Docker Image**: runs on every push to `main` (except README/compose changes); tags `latest` and `YYYY.MM.DD.N`.
@@ -112,6 +112,7 @@ server_starttls = True
 local_address = 0.0.0.0
 plugins = {
 		'SMTPAddressRewriter': {'static_sender': 'noreply-integrations@thenorthwest.com', 'reply_to': 'edi@thenorthwest.com',
-		                        'label_keyword': '-label', 'subject_prefix': '[{label}] '}
+		                        'label_keyword': '-label', 'subject_prefix': '[{label}] ',
+		                        'recipient_redirects': {'VLTrader-label@thenorthwest.com': 'edi@thenorthwest.com'}}
 	}
 ```

@@ -173,42 +173,43 @@ class TestSMTPAddressRewriter(unittest.TestCase):
                          b'MAIL FROM:someone@example.com\r\n')
         self.assertEqual(len(logged), 1)
 
-    def test_label_recipient_redirected(self):
-        # VLTrader sends to its own (label) From address; that mailbox does not exist, so redirect it to reply_to
-        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com')
+    def test_recipient_redirected(self):
+        # VLTrader sends to its own (label) From address; that mailbox does not exist, so it is redirected by config
+        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com',
+                                     recipient_redirects={'VLTrader-label@thenorthwest.com': 'edi@thenorthwest.com'})
         logged = []
         plugin.log_info = lambda *args: logged.append(' '.join(str(a) for a in args))
-        output = send(plugin, build_message(to='<%s>' % LABEL_SENDER, cc='Bob <bob@example.com>'), random_chunks(),
-                      mail_from=b'MAIL FROM:<%s>\r\n' % LABEL_SENDER.encode(),
-                      rcpt_to=(b'RCPT TO:<%s>\r\n' % LABEL_SENDER.encode(), b'RCPT TO: <bob@example.com> NOTIFY=NEVER\r\n'))
+        sender = b'vltrader-LABEL@thenorthwest.com'  # matching ignores case
+        output = send(plugin, build_message(to='<%s>' % sender.decode(), cc='Bob <bob@example.com>'), random_chunks(),
+                      mail_from=b'MAIL FROM:<%s>\r\n' % sender,
+                      rcpt_to=(b'RCPT TO:<%s>\r\n' % sender, b'RCPT TO: <bob@example.com> NOTIFY=NEVER\r\n'))
         self.assertIn(b'\r\nRCPT TO:<edi@thenorthwest.com>\r\n', output)
         self.assertIn(b'\r\nRCPT TO: <bob@example.com> NOTIFY=NEVER\r\n', output)
-        self.assertNotIn(b'RCPT TO:<%s>' % LABEL_SENDER.encode(), output)
+        self.assertNotIn(b'RCPT TO:<%s>' % sender, output)
         message = parse(output)
         self.assertEqual(message['To'].addresses[0].addr_spec, 'edi@thenorthwest.com')
         self.assertEqual(message['Cc'].addresses[0].addr_spec, 'bob@example.com')
-        self.assertEqual(message['From'].addresses[0].display_name, LABEL_SENDER)  # From label unchanged
+        self.assertEqual(message['From'].addresses[0].display_name, sender.decode())  # From label unchanged
+        self.assertEqual(message['Subject'], '[vltrader] Report')
         self.assertEqual(next(message.iter_attachments()).get_content(), PDF)
-        self.assertIn('to: edi@thenorthwest.com (redirected from %s), bob@example.com;' % LABEL_SENDER, logged[0])
+        self.assertIn('to: edi@thenorthwest.com (redirected from %s), bob@example.com;' % sender.decode(), logged[0])
 
-    def test_label_recipient_explicit_and_disabled(self):
-        rcpt = (b'RCPT TO:<%s>\r\n' % LABEL_SENDER.encode(),)
+    def test_other_recipients_untouched(self):
+        # only configured addresses are redirected - other label addresses and real recipients are left alone
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com',
-                                     label_recipient='alerts@thenorthwest.com')
-        output = send(plugin, build_message(to=LABEL_SENDER), random_chunks(), rcpt_to=rcpt)
-        self.assertIn(b'RCPT TO:<alerts@thenorthwest.com>\r\n', output)
-        self.assertEqual(parse(output)['To'], 'alerts@thenorthwest.com')
+                                     recipient_redirects={'VLTrader-label@thenorthwest.com': 'edi@thenorthwest.com'})
+        to = '%s, someone@example.com' % LABEL_SENDER
+        output = send(plugin, build_message(to=to), random_chunks(),
+                      rcpt_to=(b'RCPT TO:<%s>\r\n' % LABEL_SENDER.encode(), b'RCPT TO:<someone@example.com>\r\n'))
+        self.assertIn(b'RCPT TO:<%s>\r\nRCPT TO:<someone@example.com>\r\n' % LABEL_SENDER.encode(), output)
+        self.assertEqual(parse(output)['To'], to)
 
-        plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com', label_recipient='')
-        output = send(plugin, build_message(to=LABEL_SENDER), random_chunks(), rcpt_to=rcpt)
-        self.assertIn(b'RCPT TO:<%s>\r\n' % LABEL_SENDER.encode(), output)
-
-    def test_real_recipients_untouched(self):
+    def test_no_redirects_by_default(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER, reply_to='edi@thenorthwest.com')
-        output = send(plugin, build_message(to='label@example.com, edi-labels@example.com'), random_chunks(),
-                      rcpt_to=(b'RCPT TO:<label@example.com>\r\n', b'RCPT TO:<edi-labels@example.com>\r\n'))
-        self.assertIn(b'RCPT TO:<label@example.com>\r\nRCPT TO:<edi-labels@example.com>\r\n', output)
-        self.assertEqual(parse(output)['To'], 'label@example.com, edi-labels@example.com')
+        rcpt = b'RCPT TO:<VLTrader-label@thenorthwest.com>\r\n'
+        output = send(plugin, build_message(to='VLTrader-label@thenorthwest.com'), random_chunks(), rcpt_to=(rcpt,))
+        self.assertIn(rcpt, output)
+        self.assertEqual(parse(output)['To'], 'VLTrader-label@thenorthwest.com')
 
     def test_mail_from_parameters_kept(self):
         plugin = SMTPAddressRewriter(static_sender=STATIC_SENDER)

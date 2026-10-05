@@ -21,8 +21,9 @@ ADDRESS_MATCHER = re.compile(br'[^\s<>,;:"\'()]+@[^\s<>,;:"\'()]+')
 DEFAULT_LABEL_KEYWORD = '-label'
 DEFAULT_SUBJECT_PREFIX = '[{label}] '
 
-# Label addresses are not real mailboxes, so mail addressed *to* one can never be delivered. Some systems (e.g. VLTrader)
-# always send to their own From address, so any label recipient is redirected to label_recipient (default: reply_to)
+# recipient_redirects maps specific recipient addresses to replacements (matched case-insensitively), for systems that
+# cannot set their recipients correctly - e.g. VLTrader always sends to its own From address:
+# {'VLTrader-label@thenorthwest.com': 'edi@thenorthwest.com'}. All other recipients are never changed
 
 
 class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
@@ -33,15 +34,14 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
         DATA = 4
 
     def __init__(self, static_sender=None, reply_to=None, label_keyword=DEFAULT_LABEL_KEYWORD,
-                 subject_prefix=DEFAULT_SUBJECT_PREFIX, label_recipient=None):
+                 subject_prefix=DEFAULT_SUBJECT_PREFIX, recipient_redirects=None):
         super().__init__()
         self.static_sender = static_sender.encode('utf-8') if static_sender else None
         self.reply_to = reply_to.encode('utf-8') if reply_to else None
         self.label_keyword = label_keyword.lower() if label_keyword else None
         self.subject_prefix = subject_prefix or None  # '' (or None/False) disables subject tagging
-        if label_recipient is None:
-            label_recipient = reply_to
-        self.label_recipient = label_recipient.encode('utf-8') if label_recipient else None  # '' disables redirects
+        self.recipient_redirects = {source.lower().encode('utf-8'): target.encode('utf-8')
+                                    for source, target in (recipient_redirects or {}).items()}
         self.reset()
 
     def reset(self):
@@ -99,27 +99,24 @@ class SMTPAddressRewriter(plugins.BasePlugin.BasePlugin):
                 byte_data = b'MAIL FROM:<%b>%b\r\n' % (self.static_sender, match.group(2))  # keep SIZE= etc.
         return byte_data
 
-    def is_label_address(self, address):
-        user = address.rsplit(b'@', 1)[0].decode('utf-8', 'replace').lower()
-        return bool(self.label_keyword) and b'@' in address and user.endswith(self.label_keyword)
-
     def replace_rcpt_to(self, byte_data):
         match = SMTP_RCPT_TO_MATCHER.match(byte_data)
         recipient = match.group(1)
-        if self.label_recipient and self.is_label_address(recipient):
+        redirect = self.recipient_redirects.get(recipient.lower())
+        if redirect:
             self.recipients.append('%s (redirected from %s)' % (
-                self.label_recipient.decode('utf-8', 'replace'), recipient.decode('utf-8', 'replace')))
-            return b'RCPT TO:<%b>%b\r\n' % (self.label_recipient, match.group(2))
+                redirect.decode('utf-8', 'replace'), recipient.decode('utf-8', 'replace')))
+            return b'RCPT TO:<%b>%b\r\n' % (redirect, match.group(2))
         self.recipients.append(recipient.decode('utf-8', 'replace'))
         return byte_data
 
     def replace_recipient_headers(self, headers):
-        if not self.label_recipient:
+        if not self.recipient_redirects:
             return headers
 
         def replace_addresses(header):
             return ADDRESS_MATCHER.sub(
-                lambda a: self.label_recipient if self.is_label_address(a.group(0)) else a.group(0), header.group(0))
+                lambda a: self.recipient_redirects.get(a.group(0).lower(), a.group(0)), header.group(0))
 
         return RECIPIENT_HEADER_MATCHER.sub(replace_addresses, headers)
 
