@@ -16,3 +16,14 @@ services:
       - /data/emailproxy/config:/config
     ports:
       - 25:1587
+      # IMAP for the A/R portal runner on this host (MFA codes, invitations); loopback only
+      - 127.0.0.1:1993:1993
+    networks:
+      - default
+      # Traefik routes smtp.corp.tnwco.com to the proxy's port 80 for the Microsoft re-auth sign-in
+      - traefik
+
+networks:
+  traefik:
+    external: true
+    name: traefik_default
